@@ -20,23 +20,25 @@ JMH replaces the hand-rolled `System.nanoTime()` benchmark runner as the authori
 | **JVM Arguments** | `-Xms512m -Xmx512m -XX:+UseG1GC` |
 | **Benchmark Mode** | `Throughput` (operations / second) |
 | **Blackhole Mode** | Compiler Blackholes (JMH auto-detected) |
-| **Warmup** | 3 iterations × 2.0 seconds per trial |
-| **Measurement** | 5 iterations × 2.0 seconds per trial |
-| **Forks** | 1 forked JVM per benchmark run |
+| **Warmup** | 5 iterations × 1.0 second per trial |
+| **Measurement** | 10 iterations × 1.0 second per trial |
+| **Forks** | 3 independent JVM forks per benchmark run ($3 \times 10 = 30$ measurement iterations) |
 | **State Scope** | `@State(Scope.Benchmark)` (shared cache instance across all threads) |
 
-### Workload Parameters
+### Workload Parameters & Apples-to-Apples Verification
 
-- **Cache Capacity:** 10,000 entries
-- **Key Space:** 10,000 pre-generated string keys (`key-0` to `key-9999`)
-- **Pre-warming:** 5,000 entries pre-populated prior to measurement (50% fill)
+To ensure strict experimental control and an honest head-to-head comparison:
+- **Cache Capacity:** Exactly 10,000 entries for both `ConcurrentLRUCache` and `Caffeine`.
+- **Key Space:** Exactly 10,000 pre-generated string keys (`key-0` to `key-9999`) stored in a pre-allocated array (preventing key allocation overhead during measurement).
+- **Pre-warming:** Exactly 5,000 entries pre-populated in both caches before measurement begins (50% initial fill).
 - **Workload Mixes:**
   - `READ_HEAVY`: ~95% `get()`, ~5% `put()`
   - `BALANCED`: ~80% `get()`, ~20% `put()`
   - `WRITE_HEAVY`: ~50% `get()`, ~50% `put()`
 - **Key Distributions:**
-  - `UNIFORM`: Keys sampled uniformly at random across the key space.
-  - `ZIPFIAN`: Power-law distribution (exponent $s=1.0$) with pre-computed 65,536-entry CDF lookup table for fast $O(1)$ sampling.
+  - `UNIFORM`: Uniformly distributed random access across the 10,000 keys.
+  - `ZIPFIAN`: Power-law distribution ($s=1.0$) with pre-computed 65,536-entry CDF lookup table for fast $O(1)$ sampling.
+- **Expiration:** Neither cache uses TTL during this throughput benchmark, isolating pure eviction and concurrency mechanics.
 
 ---
 
@@ -65,50 +67,51 @@ A common pitfall in Java benchmarking is wrapping cache operations in a `for` lo
 
 ---
 
-## 3. Workload Benchmark Results (8 Threads)
+## 3. Workload Benchmark Results (3 Forks × 10 Iterations = 30 Data Points, 8 Threads)
 
 All benchmarks below were executed with 8 concurrent worker threads, comparing `ConcurrentLRUCache` (16 segments) against `Caffeine` under identical configurations:
 
 | Key Distribution | Workload Mix | Caffeine Throughput (ops/s) | ConcurrentLRUCache (ops/s) | Ratio (% of Caffeine) |
 |---|---|---|---|---|
-| **UNIFORM** | **READ_HEAVY (95/5)** | $3,979,438 \pm 453,255$ | $2,653,713 \pm 324,726$ | **66.7%** |
-| **UNIFORM** | **BALANCED (80/20)** | $3,407,539 \pm 3,199,849$ | $2,823,222 \pm 563,134$ | **82.9%** |
-| **UNIFORM** | **WRITE_HEAVY (50/50)** | $3,506,088 \pm 2,204,396$ | $3,022,457 \pm 298,535$ | **86.2%** |
-| **ZIPFIAN** | **READ_HEAVY (95/5)** | $3,436,653 \pm 1,140,874$ | $2,875,560 \pm 325,160$ | **83.7%** |
-| **ZIPFIAN** | **BALANCED (80/20)** | $3,310,887 \pm 1,657,701$ | $3,044,615 \pm 399,979$ | **92.0%** |
-| **ZIPFIAN** | **WRITE_HEAVY (50/50)** | $3,800,045 \pm 2,472,879$ | $3,425,756 \pm 536,156$ | **90.2%** |
+| **UNIFORM** | **READ_HEAVY (95/5)** | $3,506,751 \pm 289,410$ | $2,442,149 \pm 90,068$ | **69.6%** |
+| **UNIFORM** | **BALANCED (80/20)** | $3,430,754 \pm 381,421$ | $2,467,653 \pm 43,825$ | **71.9%** |
+| **UNIFORM** | **WRITE_HEAVY (50/50)** | $3,803,844 \pm 185,679$ | $2,879,588 \pm 68,199$ | **75.7%** |
+| **ZIPFIAN** | **READ_HEAVY (95/5)** | $3,504,951 \pm 423,780$ | $2,315,287 \pm 50,443$ | **66.1%** |
+| **ZIPFIAN** | **BALANCED (80/20)** | $3,913,499 \pm 460,444$ | $2,494,541 \pm 47,758$ | **63.7%** |
+| **ZIPFIAN** | **WRITE_HEAVY (50/50)** | $3,683,251 \pm 370,371$ | $2,809,590 \pm 52,527$ | **76.3%** |
 
 ---
 
-## 4. Thread Scaling Benchmark Results
+## 4. Thread Scaling Benchmark Results (3 Forks × 10 Iterations = 30 Data Points)
 
 Workload fixed at **READ_HEAVY (95% GET / 5% PUT)** with **UNIFORM** key distribution across varying thread counts:
 
-| Thread Count | Caffeine Throughput (ops/s) | ConcurrentLRUCache Throughput (ops/s) | ConcurrentLRUCache Scaling Factor |
+| Thread Count | Caffeine Throughput (ops/s) | ConcurrentLRUCache Throughput (ops/s) | ConcurrentLRUCache Relative Scaling |
 |---|---|---|---|
-| **1 Thread** | $3,626,783 \pm 1,320,191$ | $1,434,404 \pm 1,149,090$ | **1.00x** (baseline) |
-| **2 Threads** | $4,070,884 \pm 1,528,623$ | $1,585,224 \pm 709,793$ | **1.11x** |
-| **4 Threads** | $3,506,795 \pm 691,659$ | $1,981,952 \pm 356,353$ | **1.38x** |
-| **8 Threads** | $3,797,842 \pm 2,732,355$ | $2,310,748 \pm 341,522$ | **1.61x** |
-| **12 Threads** | $3,259,960 \pm 1,434,063$ | $2,486,171 \pm 191,257$ | **1.73x** |
-| **16 Threads** | $2,947,409 \pm 753,698$ | $2,596,925 \pm 362,737$ | **1.81x** |
-| **32 Threads** | $3,316,167 \pm 2,533,356$ | $2,696,519 \pm 366,176$ | **1.88x** |
+| **1 Thread** | $4,305,805 \pm 319,829$ | $2,500,286 \pm 114,670$ | **1.00x** (baseline) |
+| **2 Threads** | $4,109,883 \pm 213,769$ | $1,797,161 \pm 58,284$ | **0.72x** |
+| **4 Threads** | $4,524,772 \pm 548,241$ | $2,281,041 \pm 110,973$ | **0.91x** |
+| **8 Threads** | $3,706,489 \pm 449,834$ | $2,404,518 \pm 139,966$ | **0.96x** |
+| **12 Threads** | $3,547,933 \pm 241,937$ | $2,625,942 \pm 62,695$ | **1.05x** |
+| **16 Threads** | $3,665,445 \pm 240,169$ | $2,758,073 \pm 111,393$ | **1.10x** |
+| **32 Threads** | $3,262,700 \pm 183,534$ | $2,753,263 \pm 143,002$ | **1.10x** |
 
-### Note on Thread Count Capping
-Thread counts were tested up to 32 threads. Counts beyond 32 (e.g. 64, 128, 256) were omitted because the test hardware has 12 logical processors (8 physical cores). Beyond $2.5\times$ to $3\times$ hardware core capacity, operating system context switching and scheduler thread preemption become the dominant factor, distorting algorithm-level cache concurrency measurements.
+### Variance and Scaling Analysis
+1. **Low Variance Across Forks:** Running 3 independent forks with 10 measurement iterations each ($N=30$) narrowed `ConcurrentLRUCache` error margins to $\pm 1.7\%$ to $\pm 5.8\%$, providing statistically robust results.
+2. **2-Thread Dip on Hybrid CPU Architecture:** On 1 thread, `ConcurrentLRUCache` incurs no thread synchronization or lock contention ($\sim 2.50\text{M ops/s}$). When concurrency increases to 2 threads on Intel's hybrid architecture (4 P-cores + 4 E-cores), inter-core lock transitions and cache-line bouncing introduce overhead before thread parallelism catches up across the 16 independent segments (reaching peak throughput of $\sim 2.76\text{M ops/s}$ at 16 threads).
+3. **Thread Capping at 32 Threads:** Scaling was evaluated up to 32 threads. Beyond 32 threads ($>2.5\times$ the machine's 12 logical processors), operating system context switching and thread scheduling overhead dominate, obscuring cache algorithm performance.
 
 ---
 
 ## 5. Architectural Comparison: ConcurrentLRUCache vs. Caffeine
 
-### Why Caffeine Wins on Read-Heavy Uniform Workloads
+### Why Caffeine Leads on Read-Heavy Uniform Workloads
 - **Lock-Free Read Path:** Caffeine uses an asynchronous, lock-free ring buffer (`StripedBuffer` / `MPSC` queue) inspired by CPU cache hierarchies. Reads in Caffeine only perform a concurrent hash table lookup and append a record to a thread-local ring buffer without acquiring locks or updating doubly-linked list pointers synchronously.
 - **Synchronous Mutation in ConcurrentLRUCache:** In `ConcurrentLRUCache`, even a successful `get()` requires updating the entry's recency in the segment's `DoublyLinkedList`. Although sharded across 16 segments, each read acquires an exclusive `ReentrantLock` for that segment. Under purely read-heavy uniform traffic, this lock acquisition and pointer mutation imposes a higher per-operation cost.
 
 ### Where ConcurrentLRUCache is Strongly Competitive
-- **Balanced and Write-Heavy Workloads (83% – 92% of Caffeine):** When writes and updates occur, Caffeine must also acquire locks and execute maintenance tasks. The per-segment lock model of `ConcurrentLRUCache` shards writes cleanly with near-zero coordination between segments, achieving **3.02M – 3.43M ops/s**.
-- **Zipfian Hot-Key Workloads:** Under skewed distributions, hot entries remain at the head of their respective segment LRU lists, resulting in high cache hit rates and minimal eviction overhead (**3.43M ops/s** in write-heavy Zipfian).
-- **Simplicity and Predictability:** `ConcurrentLRUCache` maintains strict structural invariants with simple, bounded memory footprints and immediate per-segment eviction without requiring background maintenance buffers or thread pool drainage.
+- **Write-Heavy and High-Mutation Workloads (75% – 76% of Caffeine):** When writes and updates occur, Caffeine must also acquire locks and execute maintenance tasks. The per-segment lock model of `ConcurrentLRUCache` shards writes cleanly with near-zero coordination between segments, achieving **2.81M – 2.88M ops/s**.
+- **Simplicity and Strict Invariants:** `ConcurrentLRUCache` maintains strict structural invariants with simple, bounded memory footprints and immediate per-segment eviction without requiring background maintenance buffers or thread pool drainage.
 
 ---
 
@@ -120,9 +123,9 @@ To run the JMH benchmark suite:
 # 1. Build the fat benchmark jar
 mvn clean package -DskipTests
 
-# 2. Run the workload benchmarks (8 threads, uniform + Zipfian)
-java -jar target/benchmarks.jar "jmh.CacheBenchmarkJmh" -f 1 -wi 3 -i 5 -w 2 -r 2 -t 8 -rf json -rff docs/benchmarks/jmh-workload.json
+# 2. Run the workload benchmarks (3 forks, 5 warmup, 10 measurement, 8 threads)
+java -jar target/benchmarks.jar "jmh.CacheBenchmarkJmh" -f 3 -wi 5 -i 10 -w 1 -r 1 -t 8 -rf json -rff docs/benchmarks/jmh-workload.json
 
-# 3. Run the thread-scaling benchmarks (1 to 32 threads)
-java -jar target/benchmarks.jar "jmh.ThreadScalingBenchmark" -f 1 -wi 3 -i 5 -w 2 -r 2 -rf json -rff docs/benchmarks/jmh-scaling.json
+# 3. Run the thread-scaling benchmarks (3 forks, 5 warmup, 10 measurement, 1 to 32 threads)
+java -jar target/benchmarks.jar "jmh.ThreadScalingBenchmark" -f 3 -wi 5 -i 10 -w 1 -r 1 -rf json -rff docs/benchmarks/jmh-scaling.json
 ```
