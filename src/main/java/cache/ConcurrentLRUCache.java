@@ -1,51 +1,113 @@
 package cache;
 
 import java.time.Duration;
-import java.util.ArrayList;
-import java.util.List;
 import java.util.Objects;
 import java.util.Optional;
-import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicLong;
-import java.util.concurrent.locks.ReentrantReadWriteLock;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+/**
+ * A thread-safe, capacity-bounded LRU cache with optional per-entry TTL expiration.
+ *
+ * <h2>Concurrency design (Phase 1)</h2>
+ *
+ * <p>The cache is divided into {@code numSegments} independent {@link CacheSegment} instances. Each
+ * segment owns its own {@link java.util.HashMap}, {@link DoublyLinkedList}, and {@link
+ * java.util.concurrent.locks.ReentrantLock}. A key is routed to a segment by:
+ *
+ * <pre>
+ *   segment_index = (key.hashCode() &amp; 0x7FFF_FFFF) % numSegments
+ * </pre>
+ *
+ * <p>Operations on different segments proceed in parallel without any shared lock. Metrics are
+ * tracked with {@link AtomicLong} counters and are updated outside the segment lock.
+ *
+ * <h2>LRU ordering guarantee</h2>
+ *
+ * <p><strong>Ordering is per-segment, not globally exact.</strong> Each segment independently
+ * maintains recency order for its own entries. Eviction is driven by local overflow within a
+ * segment, not by global recency across all entries. See {@code docs/03_CONCURRENCY.md} for the
+ * full tradeoff discussion.
+ *
+ * <h2>TTL semantics</h2>
+ *
+ * <ul>
+ *   <li>Lazy expiration: checked on every {@code get()}.
+ *   <li>Scheduled cleanup: runs periodically via {@link ExpirationManager}.
+ * </ul>
+ *
+ * @param <K> key type (must not be {@code null})
+ * @param <V> value type (must not be {@code null})
+ */
 public final class ConcurrentLRUCache<K, V> implements AutoCloseable {
     private static final Logger LOGGER = LoggerFactory.getLogger(ConcurrentLRUCache.class);
     private static final Duration DEFAULT_CLEANUP_INTERVAL = Duration.ofMinutes(1);
 
-    private final int capacity;
-    private final ConcurrentHashMap<K, CacheNode<K, V>> entries;
-    private final DoublyLinkedList<K, V> recency;
-    private final ReentrantReadWriteLock lock;
-    private final AtomicLong hits;
-    private final AtomicLong misses;
-    private final AtomicLong evictions;
-    private final AtomicLong expiredRemovals;
-    private final AtomicLong requests;
+    /** Default number of segments. 16 allows up to 16 threads to operate in parallel. */
+    static final int DEFAULT_NUM_SEGMENTS = 16;
+
+    private final int totalCapacity;
+    private final CacheSegment<K, V>[] segments;
+    private final int numSegments;
+
+    private final AtomicLong hits = new AtomicLong();
+    private final AtomicLong misses = new AtomicLong();
+    private final AtomicLong evictions = new AtomicLong();
+    private final AtomicLong expiredRemovals = new AtomicLong();
+    private final AtomicLong requests = new AtomicLong();
+
     private final ExpirationManager<K, V> expirationManager;
+
+    // -------------------------------------------------------------------------
+    // Constructors
+    // -------------------------------------------------------------------------
 
     public ConcurrentLRUCache(int capacity) {
         this(capacity, DEFAULT_CLEANUP_INTERVAL);
     }
 
     public ConcurrentLRUCache(int capacity, Duration cleanupInterval) {
+        this(capacity, cleanupInterval, DEFAULT_NUM_SEGMENTS);
+    }
+
+    /**
+     * Creates a segmented LRU cache.
+     *
+     * @param capacity total maximum number of entries across all segments
+     * @param cleanupInterval how often the background expiration sweep runs
+     * @param numSegments number of independent shards; more segments = more parallelism
+     */
+    @SuppressWarnings("unchecked")
+    public ConcurrentLRUCache(int capacity, Duration cleanupInterval, int numSegments) {
         if (capacity <= 0) {
             throw new IllegalArgumentException("capacity must be positive");
         }
-        this.capacity = capacity;
-        this.entries = new ConcurrentHashMap<>(capacity);
-        this.recency = new DoublyLinkedList<>();
-        this.lock = new ReentrantReadWriteLock();
-        this.hits = new AtomicLong();
-        this.misses = new AtomicLong();
-        this.evictions = new AtomicLong();
-        this.expiredRemovals = new AtomicLong();
-        this.requests = new AtomicLong();
+        if (numSegments <= 0) {
+            throw new IllegalArgumentException("numSegments must be positive");
+        }
+        validateCleanupInterval(cleanupInterval);
+
+        this.totalCapacity = capacity;
+        this.numSegments = numSegments;
+        this.segments = new CacheSegment[numSegments];
+
+        // Distribute capacity as evenly as possible.
+        int base = capacity / numSegments;
+        int remainder = capacity % numSegments;
+        for (int i = 0; i < numSegments; i++) {
+            int segCapacity = base + (i < remainder ? 1 : 0);
+            // Each segment must hold at least 1 entry.
+            this.segments[i] = new CacheSegment<>(Math.max(segCapacity, 1));
+        }
+
         this.expirationManager =
                 new ExpirationManager<>(cleanupInterval, this::removeExpiredEntries);
     }
+
+    // -------------------------------------------------------------------------
+    // Public API — unchanged from v1
+    // -------------------------------------------------------------------------
 
     public void put(K key, V value) {
         put(key, value, null);
@@ -56,21 +118,15 @@ public final class ConcurrentLRUCache<K, V> implements AutoCloseable {
         Objects.requireNonNull(value, "value");
         validateTtl(ttl);
 
-        lock.writeLock().lock();
+        CacheSegment<K, V> segment = segmentFor(key);
+        segment.lock.lock();
         try {
-            CacheNode<K, V> existing = entries.get(key);
-            if (existing != null) {
-                existing.update(value, ttl);
-                recency.moveToFront(existing);
-                return;
+            boolean evicted = segment.put(key, value, ttl);
+            if (evicted) {
+                evictions.incrementAndGet();
             }
-
-            CacheNode<K, V> node = new CacheNode<>(key, value, ttl);
-            entries.put(key, node);
-            recency.addToFront(node);
-            evictOverflow();
         } finally {
-            lock.writeLock().unlock();
+            segment.lock.unlock();
         }
     }
 
@@ -78,77 +134,93 @@ public final class ConcurrentLRUCache<K, V> implements AutoCloseable {
         Objects.requireNonNull(key, "key");
         requests.incrementAndGet();
 
-        lock.writeLock().lock();
+        CacheSegment<K, V> segment = segmentFor(key);
+        segment.lock.lock();
         try {
-            CacheNode<K, V> node = entries.get(key);
-            if (node == null) {
-                misses.incrementAndGet();
-                return Optional.empty();
+            CacheSegment.GetResult<V> result = segment.get(key, System.nanoTime());
+            switch (result.status) {
+                case HIT -> hits.incrementAndGet();
+                case MISS -> misses.incrementAndGet();
+                case EXPIRED -> {
+                    expiredRemovals.incrementAndGet();
+                    misses.incrementAndGet();
+                }
             }
-
-            if (node.isExpired(System.nanoTime())) {
-                removeNode(node);
-                expiredRemovals.incrementAndGet();
-                misses.incrementAndGet();
-                return Optional.empty();
-            }
-
-            recency.moveToFront(node);
-            hits.incrementAndGet();
-            return Optional.of(node.value);
+            return result.toOptional();
         } finally {
-            lock.writeLock().unlock();
+            segment.lock.unlock();
         }
     }
 
     public V remove(K key) {
         Objects.requireNonNull(key, "key");
-        lock.writeLock().lock();
+
+        CacheSegment<K, V> segment = segmentFor(key);
+        segment.lock.lock();
         try {
-            CacheNode<K, V> node = entries.get(key);
-            if (node == null) {
-                return null;
-            }
-            removeNode(node);
-            return node.value;
+            return segment.remove(key);
         } finally {
-            lock.writeLock().unlock();
+            segment.lock.unlock();
         }
     }
 
     public boolean containsKey(K key) {
         Objects.requireNonNull(key, "key");
-        lock.readLock().lock();
+
+        CacheSegment<K, V> segment = segmentFor(key);
+        segment.lock.lock();
         try {
-            CacheNode<K, V> node = entries.get(key);
-            return node != null && !node.isExpired(System.nanoTime());
+            return segment.containsKey(key, System.nanoTime());
         } finally {
-            lock.readLock().unlock();
+            segment.lock.unlock();
         }
     }
 
+    /**
+     * Returns the current number of entries across all segments. This is a snapshot — individual
+     * segment sizes may change concurrently.
+     */
     public int size() {
-        lock.readLock().lock();
-        try {
-            return entries.size();
-        } finally {
-            lock.readLock().unlock();
+        int total = 0;
+        for (CacheSegment<K, V> segment : segments) {
+            segment.lock.lock();
+            try {
+                total += segment.size();
+            } finally {
+                segment.lock.unlock();
+            }
         }
+        return total;
     }
 
+    /**
+     * Clears all entries from all segments. Acquires segment locks in index order to prevent
+     * deadlock with any other operation that might hold multiple segment locks.
+     */
     public void clear() {
-        lock.writeLock().lock();
+        // Lock all segments in order before clearing any.
+        for (CacheSegment<K, V> segment : segments) {
+            segment.lock.lock();
+        }
         try {
-            entries.clear();
-            recency.clear();
+            for (CacheSegment<K, V> segment : segments) {
+                segment.clear();
+            }
         } finally {
-            lock.writeLock().unlock();
+            // Release in reverse order (good practice, though not required for correctness here).
+            for (int i = segments.length - 1; i >= 0; i--) {
+                segments[i].lock.unlock();
+            }
         }
     }
 
     public void shutdown() {
         expirationManager.shutdown();
     }
+
+    // -------------------------------------------------------------------------
+    // Metrics
+    // -------------------------------------------------------------------------
 
     public long getHitCount() {
         return hits.get();
@@ -186,49 +258,45 @@ public final class ConcurrentLRUCache<K, V> implements AutoCloseable {
         shutdown();
     }
 
+    // -------------------------------------------------------------------------
+    // Package-private — used by ExpirationManager callback
+    // -------------------------------------------------------------------------
+
     void removeExpiredEntries() {
-        lock.writeLock().lock();
-        try {
-            long now = System.nanoTime();
-            List<CacheNode<K, V>> expired = new ArrayList<>();
-            for (CacheNode<K, V> node : entries.values()) {
-                if (node.isExpired(now)) {
-                    expired.add(node);
-                }
+        long nowNanos = System.nanoTime();
+        int totalRemoved = 0;
+        for (CacheSegment<K, V> segment : segments) {
+            segment.lock.lock();
+            try {
+                totalRemoved += segment.removeExpired(nowNanos);
+            } finally {
+                segment.lock.unlock();
             }
-            for (CacheNode<K, V> node : expired) {
-                if (entries.get(node.key) == node) {
-                    removeNode(node);
-                    expiredRemovals.incrementAndGet();
-                }
-            }
-            if (!expired.isEmpty()) {
-                LOGGER.debug("Removed {} expired cache entries", expired.size());
-            }
-        } finally {
-            lock.writeLock().unlock();
+        }
+        if (totalRemoved > 0) {
+            expiredRemovals.addAndGet(totalRemoved);
+            LOGGER.debug("Removed {} expired cache entries", totalRemoved);
         }
     }
 
-    private void evictOverflow() {
-        while (entries.size() > capacity) {
-            CacheNode<K, V> tail = recency.removeTail();
-            if (tail == null) {
-                return;
-            }
-            entries.remove(tail.key, tail);
-            evictions.incrementAndGet();
-        }
+    // -------------------------------------------------------------------------
+    // Private helpers
+    // -------------------------------------------------------------------------
+
+    private CacheSegment<K, V> segmentFor(K key) {
+        int index = (key.hashCode() & 0x7FFF_FFFF) % numSegments;
+        return segments[index];
     }
 
-    private void removeNode(CacheNode<K, V> node) {
-        entries.remove(node.key, node);
-        recency.remove(node);
-    }
-
-    private void validateTtl(Duration ttl) {
+    private static void validateTtl(Duration ttl) {
         if (ttl != null && (ttl.isZero() || ttl.isNegative())) {
             throw new IllegalArgumentException("ttl must be positive");
+        }
+    }
+
+    private static void validateCleanupInterval(Duration interval) {
+        if (interval == null || interval.isZero() || interval.isNegative()) {
+            throw new IllegalArgumentException("cleanupInterval must be positive");
         }
     }
 }
