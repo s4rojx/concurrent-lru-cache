@@ -23,7 +23,7 @@ import org.junit.jupiter.api.Test;
 class ConcurrentLRUCacheTest {
 
     // =========================================================================
-    // Functional correctness tests (inherited from Phase 0, unchanged)
+    // Functional correctness tests
     // =========================================================================
 
     @Test
@@ -185,7 +185,7 @@ class ConcurrentLRUCacheTest {
     }
 
     // =========================================================================
-    // Phase 1 — Concurrency stress tests
+    // Concurrency stress tests
     // =========================================================================
 
     /**
