@@ -4,7 +4,7 @@
 | --- | ---: |
 | Threads | 200 |
 | Operations | 1,000,000 |
-| Throughput | 1,140,134 ops/sec |
-| Average Latency | 0.1443 ms |
-| Hit Rate | 98.37% |
-| Memory Usage | 57.26 MB |
+| Throughput | 875,756 ops/sec |
+| Average Latency | 0.2127 ms |
+| Hit Rate | 98.35% |
+| Memory Usage | 0.00 MB |
