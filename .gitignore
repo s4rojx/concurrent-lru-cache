@@ -6,3 +6,8 @@ target/
 .vscode/
 *.iml
 
+# Local-only agent instructions & task files
+AGENTS.md
+ConcurrentLRU_Project_Upgrade_plan*.md
+docs/phases/
+.agents/

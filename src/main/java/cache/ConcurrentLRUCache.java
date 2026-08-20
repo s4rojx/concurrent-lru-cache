@@ -10,41 +10,16 @@ import org.slf4j.LoggerFactory;
 /**
  * A thread-safe, capacity-bounded LRU cache with optional per-entry TTL expiration.
  *
- * <h2>Concurrency design (Phase 1)</h2>
+ * <p>Uses segmented locks to allow concurrent access across distinct key stripes. Eviction ordering
+ * is per-segment rather than globally exact (see docs/03_CONCURRENCY.md).
  *
- * <p>The cache is divided into {@code numSegments} independent {@link CacheSegment} instances. Each
- * segment owns its own {@link java.util.HashMap}, {@link DoublyLinkedList}, and {@link
- * java.util.concurrent.locks.ReentrantLock}. A key is routed to a segment by:
- *
- * <pre>
- *   segment_index = (key.hashCode() &amp; 0x7FFF_FFFF) % numSegments
- * </pre>
- *
- * <p>Operations on different segments proceed in parallel without any shared lock. Metrics are
- * tracked with {@link AtomicLong} counters and are updated outside the segment lock.
- *
- * <h2>LRU ordering guarantee</h2>
- *
- * <p><strong>Ordering is per-segment, not globally exact.</strong> Each segment independently
- * maintains recency order for its own entries. Eviction is driven by local overflow within a
- * segment, not by global recency across all entries. See {@code docs/03_CONCURRENCY.md} for the
- * full tradeoff discussion.
- *
- * <h2>TTL semantics</h2>
- *
- * <ul>
- *   <li>Lazy expiration: checked on every {@code get()}.
- *   <li>Scheduled cleanup: runs periodically via {@link ExpirationManager}.
- * </ul>
- *
- * @param <K> key type (must not be {@code null})
- * @param <V> value type (must not be {@code null})
+ * @param <K> key type
+ * @param <V> value type
  */
 public final class ConcurrentLRUCache<K, V> implements AutoCloseable {
     private static final Logger LOGGER = LoggerFactory.getLogger(ConcurrentLRUCache.class);
     private static final Duration DEFAULT_CLEANUP_INTERVAL = Duration.ofMinutes(1);
 
-    /** Default number of segments. 16 allows up to 16 threads to operate in parallel. */
     static final int DEFAULT_NUM_SEGMENTS = 16;
 
     private final int totalCapacity;
@@ -59,10 +34,6 @@ public final class ConcurrentLRUCache<K, V> implements AutoCloseable {
 
     private final ExpirationManager<K, V> expirationManager;
 
-    // -------------------------------------------------------------------------
-    // Constructors
-    // -------------------------------------------------------------------------
-
     public ConcurrentLRUCache(int capacity) {
         this(capacity, DEFAULT_CLEANUP_INTERVAL);
     }
@@ -74,9 +45,9 @@ public final class ConcurrentLRUCache<K, V> implements AutoCloseable {
     /**
      * Creates a segmented LRU cache.
      *
-     * @param capacity total maximum number of entries across all segments
-     * @param cleanupInterval how often the background expiration sweep runs
-     * @param numSegments number of independent shards; more segments = more parallelism
+     * @param capacity total maximum capacity across all segments
+     * @param cleanupInterval interval for background expired entry sweep
+     * @param numSegments number of concurrency segments
      */
     @SuppressWarnings("unchecked")
     public ConcurrentLRUCache(int capacity, Duration cleanupInterval, int numSegments) {
@@ -92,22 +63,17 @@ public final class ConcurrentLRUCache<K, V> implements AutoCloseable {
         this.numSegments = numSegments;
         this.segments = new CacheSegment[numSegments];
 
-        // Distribute capacity as evenly as possible.
         int base = capacity / numSegments;
         int remainder = capacity % numSegments;
         for (int i = 0; i < numSegments; i++) {
             int segCapacity = base + (i < remainder ? 1 : 0);
-            // Each segment must hold at least 1 entry.
+            // Ensure every segment has at least 1 slot of capacity.
             this.segments[i] = new CacheSegment<>(Math.max(segCapacity, 1));
         }
 
         this.expirationManager =
                 new ExpirationManager<>(cleanupInterval, this::removeExpiredEntries);
     }
-
-    // -------------------------------------------------------------------------
-    // Public API — unchanged from v1
-    // -------------------------------------------------------------------------
 
     public void put(K key, V value) {
         put(key, value, null);
@@ -177,8 +143,7 @@ public final class ConcurrentLRUCache<K, V> implements AutoCloseable {
     }
 
     /**
-     * Returns the current number of entries across all segments. This is a snapshot — individual
-     * segment sizes may change concurrently.
+     * Returns an approximate point-in-time snapshot of the total entry count across all segments.
      */
     public int size() {
         int total = 0;
@@ -193,12 +158,8 @@ public final class ConcurrentLRUCache<K, V> implements AutoCloseable {
         return total;
     }
 
-    /**
-     * Clears all entries from all segments. Acquires segment locks in index order to prevent
-     * deadlock with any other operation that might hold multiple segment locks.
-     */
     public void clear() {
-        // Lock all segments in order before clearing any.
+        // Acquire all segment locks in index order to prevent deadlock.
         for (CacheSegment<K, V> segment : segments) {
             segment.lock.lock();
         }
@@ -207,7 +168,6 @@ public final class ConcurrentLRUCache<K, V> implements AutoCloseable {
                 segment.clear();
             }
         } finally {
-            // Release in reverse order (good practice, though not required for correctness here).
             for (int i = segments.length - 1; i >= 0; i--) {
                 segments[i].lock.unlock();
             }
@@ -217,10 +177,6 @@ public final class ConcurrentLRUCache<K, V> implements AutoCloseable {
     public void shutdown() {
         expirationManager.shutdown();
     }
-
-    // -------------------------------------------------------------------------
-    // Metrics
-    // -------------------------------------------------------------------------
 
     public long getHitCount() {
         return hits.get();
@@ -258,10 +214,6 @@ public final class ConcurrentLRUCache<K, V> implements AutoCloseable {
         shutdown();
     }
 
-    // -------------------------------------------------------------------------
-    // Package-private — used by ExpirationManager callback
-    // -------------------------------------------------------------------------
-
     void removeExpiredEntries() {
         long nowNanos = System.nanoTime();
         int totalRemoved = 0;
@@ -278,10 +230,6 @@ public final class ConcurrentLRUCache<K, V> implements AutoCloseable {
             LOGGER.debug("Removed {} expired cache entries", totalRemoved);
         }
     }
-
-    // -------------------------------------------------------------------------
-    // Private helpers
-    // -------------------------------------------------------------------------
 
     private CacheSegment<K, V> segmentFor(K key) {
         int index = (key.hashCode() & 0x7FFF_FFFF) % numSegments;

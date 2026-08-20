@@ -8,8 +8,6 @@ Recorded: Phase 0 — Repository Discovery and Baseline
 
 ```text
 concurrent-lru/
-├── AGENTS.md                            — agent operating rules and project mission
-├── ConcurrentLRU_Project_Upgrade_plan   — original upgrade planning document
 ├── README.md                            — user-facing project description
 ├── pom.xml                              — Maven build configuration
 ├── .gitignore
@@ -19,14 +17,14 @@ concurrent-lru/
 │       ├── BenchmarkResult.java
 │       └── BenchmarkReportGenerator.java
 ├── docs/
+│   ├── 00_REPO_LAYOUT.md
+│   ├── 01_BASELINE.md
+│   ├── 02_ARCHITECTURE.md
+│   ├── 03_CONCURRENCY.md
 │   ├── architecture.md                  — original architecture description
-│   ├── benchmark-results.md             — last benchmark run output (written by BenchmarkReportGenerator)
+│   ├── benchmark-results.md             — benchmark run output
 │   ├── feynman-overview.md
-│   ├── interview-preparation.md
-│   └── phases/
-│       ├── phase-0-baseline.md
-│       ├── phase-1-concurrency.md
-│       └── phase-2 through phase-8...
+│   └── interview-preparation.md
 └── src/
     ├── main/java/cache/
     │   ├── ConcurrentLRUCache.java      — main public class
