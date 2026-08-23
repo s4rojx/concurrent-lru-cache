@@ -4,18 +4,6 @@ import java.util.HashMap;
 import java.util.LinkedHashSet;
 import java.util.Map;
 
-/**
- * O(1) LFU eviction using a doubly-linked list of frequency buckets, each holding the set of keys
- * at that frequency level. On tie, the least-recently-inserted key at the minimum frequency is
- * chosen as the eviction candidate (FIFO within each bucket via LinkedHashSet).
- *
- * <p>Memory overhead: O(n) additional space — one frequency counter and one bucket membership
- * reference per cached entry.
- *
- * <p>No frequency decay is applied. Under a shifting workload, old high-frequency keys can become
- * "stuck" at high counts and resist eviction even after they go cold. This is the known trade-off
- * of pure LFU vs. Window-TinyLFU, which handles it via the window region.
- */
 final class LFUPolicy<K, V> implements EvictionPolicy<K, V> {
 
     private final Map<K, CacheNode<K, V>> nodeMap = new HashMap<>();

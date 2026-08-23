@@ -16,10 +16,6 @@ import org.junit.jupiter.api.Test;
 
 class TtlHardeningTest {
 
-    // =========================================================================
-    // Lazy expiration + policy cleanup
-    // =========================================================================
-
     @Test
     void lazyExpiryRemovesFromPolicyForAllPolicies() throws Exception {
         for (PolicyType policy : PolicyType.values()) {
@@ -38,8 +34,6 @@ class TtlHardeningTest {
                 assertTrue(
                         cache.get("b").isPresent(), policy + ": non-expired key must return value");
 
-                // Fill beyond capacity to force eviction — if policy still tracks "a",
-                // it could be returned as eviction candidate and corrupt state
                 for (int i = 0; i < 12; i++) {
                     cache.put("fill-" + i, "v");
                 }
@@ -74,17 +68,12 @@ class TtlHardeningTest {
         }
     }
 
-    // =========================================================================
-    // TTL update semantics
-    // =========================================================================
-
     @Test
     void putOnExistingKeyFullyReplacesOldTtl() throws Exception {
         try (ConcurrentLRUCache<String, String> cache =
                 new ConcurrentLRUCache<>(10, Duration.ofMinutes(1), 1)) {
 
             cache.put("k", "v1", Duration.ofMillis(20));
-            // Re-put with a long TTL before the short one expires
             cache.put("k", "v2", Duration.ofMinutes(10));
 
             TimeUnit.MILLISECONDS.sleep(40);
@@ -122,7 +111,6 @@ class TtlHardeningTest {
             cache.put("k", "old", Duration.ofMillis(20));
             TimeUnit.MILLISECONDS.sleep(40);
 
-            // At this point "k" is expired but still in the map (lazy expiry not yet triggered)
             cache.put("k", "fresh", Duration.ofMinutes(10));
 
             Optional<String> result = cache.get("k");
@@ -130,10 +118,6 @@ class TtlHardeningTest {
             assertEquals("fresh", result.get());
         }
     }
-
-    // =========================================================================
-    // TTL edge cases
-    // =========================================================================
 
     @Test
     void zeroDurationTtlIsRejectedAtPut() {
@@ -162,34 +146,18 @@ class TtlHardeningTest {
 
             cache.put("k", "v", Duration.ofMillis(25));
 
-            // Both calls happen; by the time get() runs the TTL may have elapsed
             boolean seen = cache.containsKey("k");
             TimeUnit.MILLISECONDS.sleep(40);
             Optional<String> result = cache.get("k");
 
-            // If containsKey saw it as live, get() must not throw or return a non-null-wrapped null
             if (seen) {
-                // result is either a valid hit or empty (expired between the two calls) — never
-                // corrupt
                 result.ifPresent(v -> assertNotNull(v, "value inside Optional must not be null"));
             }
         }
     }
 
-    // =========================================================================
-    // Race condition: expiration vs eviction under concurrent pressure
-    //
-    // Ordering decision: expiration check always wins.
-    // In get(), an expired entry is removed immediately regardless of whether
-    // the same key would have been the next eviction candidate. In evictIfOverCapacity(),
-    // an expired window-victim is discarded (not promoted to main) so it cannot
-    // re-enter the policy's tracking structure.
-    // =========================================================================
-
     @Test
     void expirationAndEvictionRaceDoesNotCorruptState() throws Exception {
-        // Short TTL entries inserted concurrently with capacity-pressure puts.
-        // Validates: no exception, size <= capacity, expiredRemovals >= 0.
         for (PolicyType policy : PolicyType.values()) {
             final int capacity = 50;
             final int threads = 12;
@@ -211,8 +179,6 @@ class TtlHardeningTest {
                                             for (int op = 0; op < 500; op++) {
                                                 int key = (threadId * 31 + op) % (capacity * 2);
                                                 if (op % 5 == 0) {
-                                                    // Short TTL — will expire while other threads
-                                                    // still inserting
                                                     cache.put(key, "v", Duration.ofMillis(10));
                                                 } else if (op % 5 == 1) {
                                                     cache.put(key, "v");
@@ -239,27 +205,20 @@ class TtlHardeningTest {
 
     @Test
     void windowTinyLfuExpiredWindowVictimDoesNotDangleInPolicy() throws Exception {
-        // Specifically targets the W-TinyLFU expired-window-victim bug.
-        // Fill a small cache so the window overflows, with some entries having very short TTLs.
-        // Then force eviction and verify no entries survive that shouldn't.
         int capacity = 20;
         try (ConcurrentLRUCache<Integer, String> cache =
                 new ConcurrentLRUCache<>(
                         capacity, Duration.ofMinutes(10), 1, PolicyType.WINDOW_TINY_LFU)) {
 
-            // Insert entries with short TTL — these will land in the window
             for (int i = 0; i < 10; i++) {
                 cache.put(i, "short", Duration.ofMillis(20));
             }
             TimeUnit.MILLISECONDS.sleep(40);
 
-            // Now insert more entries — eviction will run; the window victims are expired
-            // They must be discarded, not promoted to main
             for (int i = 100; i < 130; i++) {
                 cache.put(i, "long");
             }
 
-            // Verify expired keys cannot be retrieved
             for (int i = 0; i < 10; i++) {
                 assertEquals(
                         Optional.empty(),
@@ -270,10 +229,6 @@ class TtlHardeningTest {
         }
     }
 
-    // =========================================================================
-    // close() / shutdown() during active sweep
-    // =========================================================================
-
     @Test
     void closeWhileScheduledSweepIsRunningDoesNotThrow() throws Exception {
         ConcurrentLRUCache<Integer, String> cache =
@@ -283,10 +238,7 @@ class TtlHardeningTest {
             cache.put(i, "v", Duration.ofMillis(10));
         }
 
-        // Let the sweep run at least once
         TimeUnit.MILLISECONDS.sleep(80);
-
-        // close() must complete without exception even if a sweep is mid-execution
         assertDoesNotThrow(cache::close);
     }
 
@@ -310,10 +262,6 @@ class TtlHardeningTest {
         assertTrue(cache.get("k2").isPresent(), "get() must work after shutdown()");
         cache.close();
     }
-
-    // =========================================================================
-    // Expiration metric accuracy
-    // =========================================================================
 
     @Test
     void expiredRemovalCountAccurateAfterScheduledSweep() throws Exception {

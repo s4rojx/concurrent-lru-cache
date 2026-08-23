@@ -3,48 +3,6 @@ package cache;
 import java.util.HashMap;
 import java.util.Map;
 
-/**
- * Window-TinyLFU eviction policy.
- *
- * <p><b>Algorithm overview:</b>
- *
- * <p>The cache capacity is split into two regions:
- *
- * <ul>
- *   <li><b>Window (1% of capacity, minimum 1):</b> A small LRU queue where all new entries land.
- *       Entries in the window are not subject to admission filtering.
- *   <li><b>Main (99% of capacity):</b> Split further into:
- *       <ul>
- *         <li><b>Protected (80% of main):</b> High-frequency entries. Accessed entries in probation
- *             are promoted here.
- *         <li><b>Probation (20% of main):</b> Entries that were evicted from the window but passed
- *             TinyLFU admission. Candidate for eviction.
- *       </ul>
- * </ul>
- *
- * <p><b>Admission (TinyLFU gate):</b> When an entry is promoted from the window to the main region,
- * its estimated frequency (from a Count-Min Sketch) is compared against the frequency of the
- * current probation victim. The candidate is admitted only if its frequency exceeds the victim's.
- * This prevents one-hit wonders from displacing frequently-accessed entries.
- *
- * <p><b>Count-Min Sketch:</b> A 4-bit per-counter probabilistic frequency estimator using 4 hash
- * functions over a bit array. Width is set to the nearest power-of-two >= 8 * capacity. A periodic
- * halving ("aging") resets the sketch after a configured number of increments to prevent counters
- * from saturating and to adapt to shifting access patterns.
- *
- * <p><b>Eviction order:</b>
- *
- * <ol>
- *   <li>If the window is over its target size, evict the window LRU tail and try to admit it to
- *       main's probation queue via the TinyLFU gate.
- *   <li>If the main region is over its target size, evict the probation queue tail.
- *   <li>If probation is empty, evict the protected tail.
- * </ol>
- *
- * <p><b>Known limitation:</b> The Count-Min Sketch uses a fixed hash seed, which can produce
- * suboptimal estimates for adversarial key distributions. For interview purposes, the sketch width
- * and depth are tuned to typical cache sizes (capacity >= 10).
- */
 final class WindowTinyLFUPolicy<K, V> implements EvictionPolicy<K, V> {
 
     private static final double WINDOW_RATIO = 0.01;

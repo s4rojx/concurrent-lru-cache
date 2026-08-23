@@ -22,10 +22,6 @@ import org.junit.jupiter.api.Test;
 
 class ConcurrentLRUCacheTest {
 
-    // =========================================================================
-    // Functional correctness tests
-    // =========================================================================
-
     @Test
     void supportsBasicOperations() {
         try (ConcurrentLRUCache<String, String> cache = new ConcurrentLRUCache<>(3)) {
@@ -46,14 +42,13 @@ class ConcurrentLRUCacheTest {
 
     @Test
     void evictsLeastRecentlyUsedEntry() {
-        // Use a single-segment cache to get deterministic exact-LRU behavior.
         try (ConcurrentLRUCache<String, String> cache =
                 new ConcurrentLRUCache<>(2, Duration.ofMinutes(1), 1)) {
             cache.put("a", "alpha");
             cache.put("b", "bravo");
-            assertEquals(Optional.of("alpha"), cache.get("a")); // a is now MRU
+            assertEquals(Optional.of("alpha"), cache.get("a"));
 
-            cache.put("c", "charlie"); // b is LRU in segment — evicted
+            cache.put("c", "charlie");
 
             assertEquals(Optional.empty(), cache.get("b"));
             assertEquals(Optional.of("alpha"), cache.get("a"));
@@ -68,8 +63,8 @@ class ConcurrentLRUCacheTest {
                 new ConcurrentLRUCache<>(2, Duration.ofMinutes(1), 1)) {
             cache.put("a", "alpha");
             cache.put("b", "bravo");
-            cache.put("a", "updated"); // a moves to MRU; b is now LRU
-            cache.put("c", "charlie"); // b evicted
+            cache.put("a", "updated");
+            cache.put("c", "charlie");
 
             assertEquals(Optional.of("updated"), cache.get("a"));
             assertEquals(Optional.empty(), cache.get("b"));
@@ -109,7 +104,6 @@ class ConcurrentLRUCacheTest {
 
     @Test
     void tracksStatistics() {
-        // Single-segment for deterministic eviction.
         try (ConcurrentLRUCache<String, String> cache =
                 new ConcurrentLRUCache<>(2, Duration.ofMinutes(1), 1)) {
             cache.put("a", "alpha");
@@ -184,15 +178,6 @@ class ConcurrentLRUCacheTest {
         }
     }
 
-    // =========================================================================
-    // Concurrency stress tests
-    // =========================================================================
-
-    /**
-     * Concurrent gets on the same key from many threads must all see the value or empty (never
-     * throw or return corrupted data). Validates no data structure corruption under read
-     * concurrency.
-     */
     @Test
     void concurrentGetsOnSameKeyNeverCorrupt() throws Exception {
         final int threads = 32;
@@ -231,7 +216,7 @@ class ConcurrentLRUCacheTest {
             executor.shutdown();
             assertTrue(executor.awaitTermination(15, TimeUnit.SECONDS));
             for (Future<?> f : futures) {
-                f.get(); // rethrow any exception
+                f.get();
             }
 
             assertEquals(0, errorCount.get(), "No corrupted values or exceptions expected");
@@ -239,10 +224,6 @@ class ConcurrentLRUCacheTest {
         }
     }
 
-    /**
-     * Concurrent puts to different keys must not corrupt internal state. Validates invariant:
-     * size() <= capacity after all puts.
-     */
     @Test
     void concurrentPutsRespectCapacity() throws Exception {
         final int capacity = 100;
@@ -284,17 +265,12 @@ class ConcurrentLRUCacheTest {
         }
     }
 
-    /**
-     * Mixed concurrent get/put/remove operations. Validates no exception or deadlock occurs and
-     * that the size invariant holds.
-     */
     @Test
     void concurrentGetPutRemoveMixed() throws Exception {
         final int capacity = 500;
         final int threads = 16;
 
         try (ConcurrentLRUCache<Integer, String> cache = new ConcurrentLRUCache<>(capacity)) {
-            // Pre-fill
             for (int i = 0; i < capacity / 2; i++) {
                 cache.put(i, "init-" + i);
             }
@@ -339,10 +315,6 @@ class ConcurrentLRUCacheTest {
         }
     }
 
-    /**
-     * Concurrent clear operations interleaved with puts. Validates no exceptions and that size
-     * remains bounded.
-     */
     @Test
     void concurrentClearAndPutDoNotCorrupt() throws Exception {
         final int capacity = 200;
@@ -389,10 +361,6 @@ class ConcurrentLRUCacheTest {
         }
     }
 
-    /**
-     * Concurrent eviction stress: more puts than capacity forces continuous eviction. Validates the
-     * eviction counter increases and the size invariant holds throughout.
-     */
     @Test
     void evictionUnderConcurrency() throws Exception {
         final int capacity = 50;
@@ -410,8 +378,6 @@ class ConcurrentLRUCacheTest {
                                 () -> {
                                     try {
                                         barrier.await();
-                                        // Each thread inserts 1000 distinct keys into a capacity-50
-                                        // cache, forcing many evictions.
                                         for (int i = 0; i < 1_000; i++) {
                                             cache.put(threadId * 1_000 + i, "val-" + i);
                                         }
@@ -433,10 +399,6 @@ class ConcurrentLRUCacheTest {
         }
     }
 
-    /**
-     * Concurrent TTL: many threads write entries with short TTLs while other threads read.
-     * Validates no thread ever observes a corrupted or null value where a non-null was expected.
-     */
     @Test
     void ttlExpirationUnderConcurrency() throws Exception {
         final int threads = 12;
@@ -457,11 +419,8 @@ class ConcurrentLRUCacheTest {
                                         for (int op = 0; op < 500; op++) {
                                             String key = "key-" + (threadId * 500 + op) % 200;
                                             if (op % 3 == 0) {
-                                                // Write with short TTL
                                                 cache.put(key, "val-" + op, Duration.ofMillis(50));
                                             } else {
-                                                // Read — may be hit or expired-miss, but must not
-                                                // return corrupted data
                                                 Optional<String> result = cache.get(key);
                                                 if (result.isPresent() && result.get() == null) {
                                                     errorCount.incrementAndGet();
@@ -485,17 +444,12 @@ class ConcurrentLRUCacheTest {
         }
     }
 
-    /**
-     * Metrics remain consistent under concurrency: totalRequests == hits + misses (since every
-     * expired access counts as a miss).
-     */
     @Test
     void metricsConsistencyUnderConcurrency() throws Exception {
         final int threads = 16;
         final int opsPerThread = 1_000;
 
         try (ConcurrentLRUCache<Integer, String> cache = new ConcurrentLRUCache<>(200)) {
-            // Pre-fill half the keyspace.
             for (int i = 0; i < 100; i++) {
                 cache.put(i, "val-" + i);
             }
@@ -547,10 +501,6 @@ class ConcurrentLRUCacheTest {
         }
     }
 
-    /**
-     * Executor shutdown: after shutdown() is called, background expiration stops but the cache
-     * continues to function for foreground operations. Validates no exception is thrown.
-     */
     @Test
     void executorShutdownIsClean() throws InterruptedException {
         ConcurrentLRUCache<String, String> cache =
@@ -558,24 +508,16 @@ class ConcurrentLRUCacheTest {
         cache.put("k", "v");
         assertEquals(Optional.of("v"), cache.get("k"));
 
-        // Let the background thread run at least once.
         TimeUnit.MILLISECONDS.sleep(150);
 
-        // Shutdown should complete without exception.
         cache.shutdown();
 
-        // Foreground operations must still work after shutdown.
         cache.put("k2", "v2");
         assertEquals(Optional.of("v2"), cache.get("k2"));
 
-        // Double-shutdown via close() must not throw.
         cache.close();
     }
 
-    /**
-     * Validates the invariant that map and LRU list stay consistent: after all operations, size()
-     * equals the number of keys actually present.
-     */
     @Test
     void sizeInvariantHoldsUnderConcurrency() throws Exception {
         final int capacity = 100;
