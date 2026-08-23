@@ -1,8 +1,10 @@
 package cache;
 
 import java.time.Duration;
+import java.util.HashSet;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
 import java.util.concurrent.ConcurrentHashMap;
@@ -12,6 +14,7 @@ import java.util.function.Function;
 final class SingleFlightCoordinator<K, V> {
 
     private final ConcurrentHashMap<K, CompletableFuture<V>> inFlight = new ConcurrentHashMap<>();
+    private final ThreadLocal<Set<K>> currentThreadKeys = ThreadLocal.withInitial(HashSet::new);
 
     V getOrLoad(
             K key,
@@ -21,6 +24,10 @@ final class SingleFlightCoordinator<K, V> {
             BiConsumer<K, V> cacheWriter) {
         Objects.requireNonNull(key, "key");
         Objects.requireNonNull(loader, "loader");
+
+        if (currentThreadKeys.get().contains(key)) {
+            throw new IllegalStateException("Recursive load detected for key: " + key);
+        }
 
         Optional<V> existing = cacheReader.apply(key);
         if (existing.isPresent()) {
@@ -39,7 +46,14 @@ final class SingleFlightCoordinator<K, V> {
                     return cached;
                 }
 
-                V loaded = loader.apply(key);
+                currentThreadKeys.get().add(key);
+                V loaded;
+                try {
+                    loaded = loader.apply(key);
+                } finally {
+                    currentThreadKeys.get().remove(key);
+                }
+
                 if (loaded == null) {
                     throw new NullPointerException("loader returned null for key: " + key);
                 }

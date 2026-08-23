@@ -13,6 +13,7 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import org.junit.jupiter.api.Test;
 
@@ -185,13 +186,117 @@ class SingleFlightTest {
     }
 
     @Test
-    void loaderReturningNullThrowsAndAllowsRetry() {
+    void nullLoaderThrowsNullPointerExceptionForLeaderAndFollowers() throws Exception {
+        final int threads = 8;
+        final CountDownLatch leaderRunning = new CountDownLatch(1);
+        final CountDownLatch allowLeaderFinish = new CountDownLatch(1);
+        final CountDownLatch startLatch = new CountDownLatch(1);
+
         try (ConcurrentLRUCache<String, String> cache = new ConcurrentLRUCache<>(10)) {
-            assertThrows(NullPointerException.class, () -> cache.get("null-key", k -> null));
-            assertFalse(cache.containsKey("null-key"));
+            ExecutorService executor = Executors.newFixedThreadPool(threads);
+            List<Future<String>> futures = new ArrayList<>();
+
+            for (int i = 0; i < threads; i++) {
+                futures.add(
+                        executor.submit(
+                                () -> {
+                                    startLatch.await();
+                                    return cache.get(
+                                            "null-key",
+                                            k -> {
+                                                leaderRunning.countDown();
+                                                try {
+                                                    allowLeaderFinish.await();
+                                                } catch (InterruptedException e) {
+                                                    Thread.currentThread().interrupt();
+                                                }
+                                                return null;
+                                            });
+                                }));
+            }
+
+            startLatch.countDown();
+            leaderRunning.await(5, TimeUnit.SECONDS);
+            allowLeaderFinish.countDown();
+
+            executor.shutdown();
+            assertTrue(executor.awaitTermination(10, TimeUnit.SECONDS));
+
+            int npeCount = 0;
+            for (Future<String> f : futures) {
+                try {
+                    f.get();
+                } catch (ExecutionException e) {
+                    if (e.getCause() instanceof NullPointerException
+                            && e.getCause().getMessage().contains("loader returned null")) {
+                        npeCount++;
+                    }
+                }
+            }
+
+            assertEquals(
+                    threads,
+                    npeCount,
+                    "leader and all follower threads must receive NullPointerException");
+            assertFalse(
+                    cache.containsKey("null-key"), "null values must never be stored in the cache");
 
             String valid = cache.get("null-key", k -> "valid");
-            assertEquals("valid", valid);
+            assertEquals("valid", valid, "subsequent call must succeed after null loader failure");
+        }
+    }
+
+    @Test
+    void reentrantLoadOnSameKeyThrowsIllegalStateExceptionWithoutDeadlock() {
+        try (ConcurrentLRUCache<String, String> cache = new ConcurrentLRUCache<>(10)) {
+            IllegalStateException ex =
+                    assertThrows(
+                            IllegalStateException.class,
+                            () ->
+                                    cache.get(
+                                            "reentrant-key",
+                                            k -> cache.get("reentrant-key", k2 -> "inner-val")));
+
+            assertTrue(
+                    ex.getMessage().contains("Recursive load detected for key: reentrant-key"),
+                    "must detect recursive load on same key");
+
+            String recovered = cache.get("reentrant-key", k -> "recovered");
+            assertEquals(
+                    "recovered",
+                    recovered,
+                    "cache must remain functional for the key after recursive error");
+        }
+    }
+
+    @Test
+    void leaderRechecksCacheAfterWinningRaceToAvoidRedundantLoad() {
+        try (ConcurrentLRUCache<String, String> cache = new ConcurrentLRUCache<>(10)) {
+            SingleFlightCoordinator<String, String> coordinator = new SingleFlightCoordinator<>();
+            AtomicInteger loadCount = new AtomicInteger();
+            AtomicBoolean firstCheck = new AtomicBoolean(true);
+
+            String result =
+                    coordinator.getOrLoad(
+                            "race-key",
+                            k -> {
+                                loadCount.incrementAndGet();
+                                return "from-loader";
+                            },
+                            null,
+                            k -> {
+                                if (firstCheck.getAndSet(false)) {
+                                    return java.util.Optional.empty();
+                                }
+                                return java.util.Optional.of("from-concurrent-put");
+                            },
+                            (k, v) -> cache.put(k, v));
+
+            assertEquals("from-concurrent-put", result);
+            assertEquals(
+                    0,
+                    loadCount.get(),
+                    "loader must not be invoked if re-check finds cached value");
         }
     }
 
@@ -218,7 +323,7 @@ class SingleFlightTest {
     }
 
     @Test
-    void recursiveLoadDoesNotDeadlock() {
+    void recursiveLoadOnDifferentKeysDoesNotDeadlock() {
         try (ConcurrentLRUCache<String, String> cache = new ConcurrentLRUCache<>(10)) {
             String val =
                     cache.get(
