@@ -73,4 +73,4 @@ java -jar target/benchmarks.jar "jmh.CacheBenchmarkJmh" -f 3 -wi 5 -i 10 -w 1 -r
 java -jar target/benchmarks.jar "jmh.ThreadScalingBenchmark" -f 3 -wi 5 -i 10 -w 1 -r 1
 ```
 
-Full benchmark methodology, results tables, and Caffeine comparisons are documented in `docs/04_BENCHMARKS.md`.
+Full benchmark methodology, results tables, and Caffeine comparisons are documented in `docs/04_BENCHMARKS.md`.     
