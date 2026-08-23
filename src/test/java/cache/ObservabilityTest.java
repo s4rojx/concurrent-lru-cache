@@ -44,7 +44,6 @@ class ObservabilityTest {
     void perSegmentMetricsReflectRealLoadDistribution() {
         try (ConcurrentLRUCache<SkewedKey, String> cache =
                 new ConcurrentLRUCache<>(32, Duration.ofMinutes(1), 4)) {
-            // Hash 0 maps to segment 0, hash 1 maps to segment 1
             cache.put(new SkewedKey("k0-1", 0), "v");
             cache.put(new SkewedKey("k0-2", 0), "v");
             cache.put(new SkewedKey("k1-1", 1), "v");
