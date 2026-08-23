@@ -4,6 +4,7 @@ import java.time.Duration;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.function.Function;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -24,6 +25,7 @@ public final class ConcurrentLRUCache<K, V> implements AutoCloseable {
     private final AtomicLong requests = new AtomicLong();
 
     private final ExpirationManager<K, V> expirationManager;
+    private final SingleFlightCoordinator<K, V> coordinator = new SingleFlightCoordinator<>();
 
     public ConcurrentLRUCache(int capacity) {
         this(capacity, DEFAULT_CLEANUP_INTERVAL, DEFAULT_NUM_SEGMENTS, PolicyType.LRU);
@@ -108,6 +110,15 @@ public final class ConcurrentLRUCache<K, V> implements AutoCloseable {
         } finally {
             segment.lock.unlock();
         }
+    }
+
+    public V get(K key, Function<? super K, ? extends V> loader) {
+        return get(key, loader, null);
+    }
+
+    public V get(K key, Function<? super K, ? extends V> loader, Duration ttl) {
+        validateTtl(ttl);
+        return coordinator.getOrLoad(key, loader, ttl, this::get, (k, v) -> put(k, v, ttl));
     }
 
     public V remove(K key) {
