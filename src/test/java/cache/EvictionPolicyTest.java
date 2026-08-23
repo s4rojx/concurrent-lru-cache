@@ -194,16 +194,14 @@ class EvictionPolicyTest {
     @Test
     void hitRateComparisonZipfianWorkload() {
         // Methodology:
-        //   keySpace=1000, capacity=100 (10% of key space), skew=1.0 (Zipfian s=1.0)
-        //   50,000 operations per policy via the same KeyDistribution generator used in JMH Phase 2
-        //   Warmup: first 5,000 ops not counted
-        //   Measurement: next 45,000 ops; hit rate = hits / 45,000
-        //   All three policies run on single-segment caches for identical comparison
-
-        int capacity = 100;
-        int keySpace = 1000;
-        int warmup = 5_000;
-        int measured = 45_000;
+        //   keySpace=100,000, capacity=10,000 (10% — matches Phase 2 JMH config)
+        //   skew=1.0 (Zipfian s=1.0), same KeyDistribution generator used in JMH benchmarks
+        //   Warmup: 50,000 ops (not measured); Measurement: 200,000 ops
+        //   Single-segment caches for identical key routing across all three policies
+        int capacity = 10_000;
+        int keySpace = 100_000;
+        int warmup = 50_000;
+        int measured = 200_000;
         jmh.KeyDistribution zipf = new jmh.KeyDistribution(keySpace, true);
 
         double lruRate = measureHitRate(PolicyType.LRU, capacity, keySpace, warmup, measured, zipf);
@@ -219,12 +217,11 @@ class EvictionPolicyTest {
                         + "  Window-TinyLFU:   %.2f%%%n",
                 capacity, keySpace, lruRate * 100, lfuRate * 100, wtlfuRate * 100);
 
-        // All policies must achieve non-trivial hit rates on Zipfian (hot keys dominate).
-        assertTrue(lruRate > 0.20, "LRU hit rate on Zipfian must be > 20%; was " + lruRate);
-        assertTrue(lfuRate > 0.20, "LFU hit rate on Zipfian must be > 20%; was " + lfuRate);
+        assertTrue(lruRate > 0.30, "LRU hit rate on Zipfian must be > 30%; was " + lruRate);
+        assertTrue(lfuRate > 0.30, "LFU hit rate on Zipfian must be > 30%; was " + lfuRate);
         assertTrue(
-                wtlfuRate > 0.20,
-                "Window-TinyLFU hit rate on Zipfian must be > 20%; was " + wtlfuRate);
+                wtlfuRate > 0.30,
+                "Window-TinyLFU hit rate on Zipfian must be > 30%; was " + wtlfuRate);
     }
 
     @Test
@@ -256,6 +253,147 @@ class EvictionPolicyTest {
         assertTrue(
                 lruRate > expected - tolerance,
                 "LRU hit rate must be close to theoretical; was " + lruRate);
+    }
+
+    @Test
+    void hitRateComparisonDistributionShift() {
+        // Tests adaptability to shifting access patterns.
+        //
+        // Setup:
+        //   capacity=10,000, hotSetSize=10,000, total keySpace=100,000
+        //   Phase 1: Zipfian over keys 0-9,999 ("old hot set")
+        //     - 50,000 warmup ops (not counted), then 100,000 measured ops
+        //   Phase 2: Zipfian over keys 50,000-59,999 ("new hot set")
+        //     - New keys have zero prior frequency in LFU's counters
+        //     - 100,000 measured ops; hit rate counted only for this phase
+        //
+        // Expected:
+        //   LFU: old-hot-set keys have saturated frequency; new hot keys start at freq=1
+        //     and must displace established entries. Adapts slowly.
+        //   LRU: no frequency memory. Adapts as soon as old keys stop arriving.
+        //   Window-TinyLFU: Count-Min Sketch halving decays old frequencies over time.
+        //     Admission gate becomes increasingly permissive for new hot keys as old
+        //     counts halve. Should adapt faster than pure LFU.
+        int capacity = 10_000;
+        int hotSetSize = 10_000;
+        int keySpace = 100_000;
+        int warmupOps = 50_000;
+        int phase1Ops = 100_000;
+        int phase2Ops = 100_000;
+        int oldHotOffset = 0;
+        int newHotOffset = 50_000;
+
+        jmh.KeyDistribution phase1Dist = new jmh.KeyDistribution(hotSetSize, true);
+        jmh.KeyDistribution phase2Dist = new jmh.KeyDistribution(hotSetSize, true);
+
+        String[] keys = new String[keySpace];
+        for (int i = 0; i < keySpace; i++) {
+            keys[i] = "k" + i;
+        }
+
+        double lruRate =
+                measureShiftHitRate(
+                        PolicyType.LRU,
+                        capacity,
+                        keys,
+                        phase1Dist,
+                        oldHotOffset,
+                        phase2Dist,
+                        newHotOffset,
+                        warmupOps,
+                        phase1Ops,
+                        phase2Ops);
+        double lfuRate =
+                measureShiftHitRate(
+                        PolicyType.LFU,
+                        capacity,
+                        keys,
+                        phase1Dist,
+                        oldHotOffset,
+                        phase2Dist,
+                        newHotOffset,
+                        warmupOps,
+                        phase1Ops,
+                        phase2Ops);
+        double wtlfuRate =
+                measureShiftHitRate(
+                        PolicyType.WINDOW_TINY_LFU,
+                        capacity,
+                        keys,
+                        phase1Dist,
+                        oldHotOffset,
+                        phase2Dist,
+                        newHotOffset,
+                        warmupOps,
+                        phase1Ops,
+                        phase2Ops);
+
+        System.out.printf(
+                "%n=== Distribution Shift Hit Rate (post-shift phase only) ===%n"
+                        + "  LRU:              %.2f%%%n"
+                        + "  LFU:              %.2f%%%n"
+                        + "  Window-TinyLFU:   %.2f%%%n",
+                lruRate * 100, lfuRate * 100, wtlfuRate * 100);
+
+        // All policies must recover some hits after the shift.
+        assertTrue(lruRate > 0.05, "LRU must achieve > 5% hit rate post-shift; was " + lruRate);
+        assertTrue(
+                wtlfuRate > 0.05,
+                "Window-TinyLFU must achieve > 5% hit rate post-shift; was " + wtlfuRate);
+        // Window-TinyLFU must not be significantly worse than pure LFU post-shift
+        // (it should be equal or better due to frequency aging).
+        assertTrue(
+                wtlfuRate >= lfuRate * 0.80,
+                "Window-TinyLFU post-shift hit rate must be >= 80% of LFU's; LFU="
+                        + lfuRate
+                        + " WTLFU="
+                        + wtlfuRate);
+    }
+
+    private double measureShiftHitRate(
+            PolicyType policy,
+            int capacity,
+            String[] keys,
+            jmh.KeyDistribution phase1Dist,
+            int phase1Offset,
+            jmh.KeyDistribution phase2Dist,
+            int phase2Offset,
+            int warmupOps,
+            int phase1Ops,
+            int phase2Ops) {
+
+        try (ConcurrentLRUCache<String, String> cache =
+                new ConcurrentLRUCache<>(capacity, Duration.ofMinutes(10), 1, policy)) {
+
+            // Warmup: drive phase-1 distribution to seed initial cache state
+            for (int i = 0; i < warmupOps; i++) {
+                String k = keys[phase1Offset + phase1Dist.nextKey()];
+                if (cache.get(k).isEmpty()) {
+                    cache.put(k, "v");
+                }
+            }
+
+            // Phase 1: measured ops against old hot set — seeds LFU frequency counts
+            for (int i = 0; i < phase1Ops; i++) {
+                String k = keys[phase1Offset + phase1Dist.nextKey()];
+                if (cache.get(k).isEmpty()) {
+                    cache.put(k, "v");
+                }
+            }
+
+            // Phase 2: shift to new hot set — measure hit rate only here
+            long hits = 0;
+            for (int i = 0; i < phase2Ops; i++) {
+                String k = keys[phase2Offset + phase2Dist.nextKey()];
+                Optional<String> result = cache.get(k);
+                if (result.isPresent()) {
+                    hits++;
+                } else {
+                    cache.put(k, "v");
+                }
+            }
+            return (double) hits / phase2Ops;
+        }
     }
 
     private double measureHitRate(
