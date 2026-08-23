@@ -8,17 +8,6 @@ import java.util.concurrent.TimeUnit;
 import org.openjdk.jmh.annotations.*;
 import org.openjdk.jmh.infra.Blackhole;
 
-/**
- * Thread-scaling benchmark: measures aggregate throughput as active thread count increases.
- *
- * <p>Workload is fixed at read-heavy / uniform (GET_PROB=0.95) to isolate the concurrency
- * variable. Each method is annotated with a distinct {@code @Threads(N)} value so JMH runs that
- * exact number of concurrent threads for that benchmark row.
- *
- * <p>Thread counts: 1, 2, 4, 8, 12, 16, 32. Counts 64–256 are omitted because this machine has 12
- * logical processors (8 P-cores + 4 E-cores); above 32 threads the OS scheduler overhead dominates
- * and results do not reflect cache concurrency design. See docs/04_BENCHMARKS.md §4 for discussion.
- */
 @BenchmarkMode(Mode.Throughput)
 @OutputTimeUnit(TimeUnit.SECONDS)
 @State(Scope.Benchmark)

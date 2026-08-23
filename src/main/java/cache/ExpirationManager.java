@@ -7,7 +7,6 @@ import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 
-/** Coordinates periodic background cleanup of expired cache entries. */
 public final class ExpirationManager<K, V> implements AutoCloseable {
     private static final AtomicInteger THREAD_COUNTER = new AtomicInteger();
 

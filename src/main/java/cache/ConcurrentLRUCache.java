@@ -7,15 +7,6 @@ import java.util.concurrent.atomic.AtomicLong;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-/**
- * A thread-safe, capacity-bounded LRU cache with optional per-entry TTL expiration.
- *
- * <p>Uses segmented locks to allow concurrent access across distinct key stripes. Eviction ordering
- * is per-segment rather than globally exact (see docs/03_CONCURRENCY.md).
- *
- * @param <K> key type
- * @param <V> value type
- */
 public final class ConcurrentLRUCache<K, V> implements AutoCloseable {
     private static final Logger LOGGER = LoggerFactory.getLogger(ConcurrentLRUCache.class);
     private static final Duration DEFAULT_CLEANUP_INTERVAL = Duration.ofMinutes(1);
@@ -42,13 +33,6 @@ public final class ConcurrentLRUCache<K, V> implements AutoCloseable {
         this(capacity, cleanupInterval, DEFAULT_NUM_SEGMENTS);
     }
 
-    /**
-     * Creates a segmented LRU cache.
-     *
-     * @param capacity total maximum capacity across all segments
-     * @param cleanupInterval interval for background expired entry sweep
-     * @param numSegments number of concurrency segments
-     */
     @SuppressWarnings("unchecked")
     public ConcurrentLRUCache(int capacity, Duration cleanupInterval, int numSegments) {
         if (capacity <= 0) {

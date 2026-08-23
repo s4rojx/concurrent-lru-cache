@@ -8,11 +8,6 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.locks.ReentrantLock;
 
-/**
- * An isolated segment managing a partition of cache entries, its own LRU list, and lock.
- *
- * <p>All operations must be performed while holding {@link #lock}.
- */
 final class CacheSegment<K, V> {
 
     final ReentrantLock lock = new ReentrantLock();
