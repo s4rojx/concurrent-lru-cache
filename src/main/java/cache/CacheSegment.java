@@ -78,12 +78,14 @@ final class CacheSegment<K, V> {
                 expired.add(node);
             }
         }
+        int removed = 0;
         for (CacheNode<K, V> node : expired) {
             if (map.get(node.key) == node) {
                 removeNode(node);
+                removed++;
             }
         }
-        return expired.size();
+        return removed;
     }
 
     private boolean evictIfOverCapacity() {
@@ -94,7 +96,11 @@ final class CacheSegment<K, V> {
             CacheNode<K, V> windowVictim = policy.evictionCandidate();
             if (windowVictim != null) {
                 map.remove(windowVictim.key, windowVictim);
-                wtlfu.promoteWindowVictimToMain(windowVictim);
+                if (!windowVictim.isExpired(System.nanoTime())) {
+                    wtlfu.promoteWindowVictimToMain(windowVictim);
+                } else {
+                    wtlfu.discardWindowVictim(windowVictim);
+                }
                 if (map.size() <= capacity) {
                     return true;
                 }

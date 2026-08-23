@@ -178,6 +178,12 @@ final class WindowTinyLFUPolicy<K, V> implements EvictionPolicy<K, V> {
         }
     }
 
+    void discardWindowVictim(CacheNode<K, V> node) {
+        windowQueue.remove(node);
+        windowSize--;
+        queueMap.remove(node.key);
+    }
+
     boolean isWindowOverCapacity() {
         return windowSize > windowMaxSize;
     }
