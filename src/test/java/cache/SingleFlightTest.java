@@ -148,6 +148,11 @@ class SingleFlightTest {
                                             "failing-key",
                                             k -> {
                                                 attemptCount.incrementAndGet();
+                                                try {
+                                                    TimeUnit.MILLISECONDS.sleep(50);
+                                                } catch (InterruptedException e) {
+                                                    Thread.currentThread().interrupt();
+                                                }
                                                 throw new IllegalStateException(
                                                         "database unreachable");
                                             });
@@ -284,12 +289,8 @@ class SingleFlightTest {
                                 return "from-loader";
                             },
                             null,
-                            k -> {
-                                if (firstCheck.getAndSet(false)) {
-                                    return java.util.Optional.empty();
-                                }
-                                return java.util.Optional.of("from-concurrent-put");
-                            },
+                            k -> java.util.Optional.empty(),
+                            k -> java.util.Optional.of("from-concurrent-put"),
                             (k, v) -> cache.put(k, v));
 
             assertEquals("from-concurrent-put", result);

@@ -16,6 +16,12 @@ final class CacheSegment<K, V> {
     private final Map<K, CacheNode<K, V>> map;
     private final EvictionPolicy<K, V> policy;
 
+    private long hits;
+    private long misses;
+    private long evictions;
+    private long expiredRemovals;
+    private long requests;
+
     CacheSegment(int capacity, EvictionPolicy<K, V> policy) {
         this.capacity = capacity;
         this.map = new HashMap<>(Math.max(capacity * 2, 16));
@@ -23,12 +29,31 @@ final class CacheSegment<K, V> {
     }
 
     GetResult<V> get(K key, long nowNanos) {
+        requests++;
+        CacheNode<K, V> node = map.get(key);
+        if (node == null) {
+            misses++;
+            return GetResult.miss();
+        }
+        if (node.isExpired(nowNanos)) {
+            removeNode(node);
+            misses++;
+            expiredRemovals++;
+            return GetResult.expired();
+        }
+        policy.onAccess(node);
+        hits++;
+        return GetResult.hit(node.value);
+    }
+
+    GetResult<V> getQuietly(K key, long nowNanos) {
         CacheNode<K, V> node = map.get(key);
         if (node == null) {
             return GetResult.miss();
         }
         if (node.isExpired(nowNanos)) {
             removeNode(node);
+            expiredRemovals++;
             return GetResult.expired();
         }
         policy.onAccess(node);
@@ -45,7 +70,11 @@ final class CacheSegment<K, V> {
         CacheNode<K, V> node = new CacheNode<>(key, value, ttl);
         map.put(key, node);
         policy.onInsert(node);
-        return evictIfOverCapacity();
+        boolean evicted = evictIfOverCapacity();
+        if (evicted) {
+            evictions++;
+        }
+        return evicted;
     }
 
     V remove(K key) {
@@ -85,7 +114,26 @@ final class CacheSegment<K, V> {
                 removed++;
             }
         }
+        expiredRemovals += removed;
         return removed;
+    }
+
+    SegmentStats getStats(int segmentIndex) {
+        double hitRate = requests == 0 ? 0.0 : (double) hits / requests;
+        return new SegmentStats(
+                segmentIndex,
+                map.size(),
+                capacity,
+                hits,
+                misses,
+                evictions,
+                expiredRemovals,
+                requests,
+                hitRate);
+    }
+
+    PolicyStats getPolicyStats() {
+        return policy.getStats();
     }
 
     private boolean evictIfOverCapacity() {

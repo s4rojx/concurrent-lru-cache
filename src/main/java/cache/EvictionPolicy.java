@@ -11,4 +11,8 @@ interface EvictionPolicy<K, V> {
     CacheNode<K, V> evictionCandidate();
 
     void clear();
+
+    default PolicyStats getStats() {
+        return PolicyStats.empty();
+    }
 }

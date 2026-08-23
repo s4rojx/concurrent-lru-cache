@@ -1,6 +1,8 @@
 package cache;
 
 import java.time.Duration;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.concurrent.atomic.AtomicLong;
@@ -118,7 +120,23 @@ public final class ConcurrentLRUCache<K, V> implements AutoCloseable {
 
     public V get(K key, Function<? super K, ? extends V> loader, Duration ttl) {
         validateTtl(ttl);
-        return coordinator.getOrLoad(key, loader, ttl, this::get, (k, v) -> put(k, v, ttl));
+        return coordinator.getOrLoad(
+                key, loader, ttl, this::get, this::getQuietly, (k, v) -> put(k, v, ttl));
+    }
+
+    Optional<V> getQuietly(K key) {
+        CacheSegment<K, V> segment = segmentFor(key);
+        segment.lock.lock();
+        try {
+            CacheSegment.GetResult<V> result = segment.getQuietly(key, System.nanoTime());
+            if (result.status == CacheSegment.GetStatus.HIT) {
+                hits.incrementAndGet();
+                misses.decrementAndGet();
+            }
+            return result.toOptional();
+        } finally {
+            segment.lock.unlock();
+        }
     }
 
     public V remove(K key) {
@@ -198,14 +216,71 @@ public final class ConcurrentLRUCache<K, V> implements AutoCloseable {
         return total == 0 ? 0.0 : (double) hits.get() / total;
     }
 
+    public List<SegmentStats> getSegmentStats() {
+        List<SegmentStats> stats = new ArrayList<>(segments.length);
+        for (int i = 0; i < segments.length; i++) {
+            CacheSegment<K, V> segment = segments[i];
+            segment.lock.lock();
+            try {
+                stats.add(segment.getStats(i));
+            } finally {
+                segment.lock.unlock();
+            }
+        }
+        return stats;
+    }
+
+    public SegmentStats getSegmentStats(int segmentIndex) {
+        if (segmentIndex < 0 || segmentIndex >= segments.length) {
+            throw new IndexOutOfBoundsException("Segment index out of range: " + segmentIndex);
+        }
+        CacheSegment<K, V> segment = segments[segmentIndex];
+        segment.lock.lock();
+        try {
+            return segment.getStats(segmentIndex);
+        } finally {
+            segment.lock.unlock();
+        }
+    }
+
+    public PolicyStats getPolicyStats() {
+        long admissions = 0;
+        long rejections = 0;
+        String name = "NONE";
+        for (CacheSegment<K, V> segment : segments) {
+            segment.lock.lock();
+            try {
+                PolicyStats ps = segment.getPolicyStats();
+                name = ps.policyName();
+                admissions += ps.admissions();
+                rejections += ps.rejections();
+            } finally {
+                segment.lock.unlock();
+            }
+        }
+        long total = admissions + rejections;
+        double rate = total == 0 ? 0.0 : (double) rejections / total;
+        return new PolicyStats(name, admissions, rejections, rate);
+    }
+
     public CacheStats getStats() {
+        List<SegmentStats> segStats = getSegmentStats();
+        PolicyStats polStats = getPolicyStats();
         return new CacheStats(
                 hits.get(),
                 misses.get(),
                 evictions.get(),
                 expiredRemovals.get(),
                 requests.get(),
-                getHitRate());
+                getHitRate(),
+                coordinator.getLoadAttempts(),
+                coordinator.getLoadSuccessCount(),
+                coordinator.getLoadFailureCount(),
+                coordinator.getCoalescedLoadCount(),
+                coordinator.getTotalLoadTimeNanos(),
+                coordinator.getAverageLoadLatencyNanos(),
+                segStats,
+                polStats);
     }
 
     @Override

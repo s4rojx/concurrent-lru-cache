@@ -15,6 +15,9 @@ final class WindowTinyLFUPolicy<K, V> implements EvictionPolicy<K, V> {
     private int protectedSize = 0;
     private int probationSize = 0;
 
+    private long admissions = 0;
+    private long rejections = 0;
+
     private final DoublyLinkedList<K, V> windowQueue = new DoublyLinkedList<>();
     private final DoublyLinkedList<K, V> probationQueue = new DoublyLinkedList<>();
     private final DoublyLinkedList<K, V> protectedQueue = new DoublyLinkedList<>();
@@ -128,12 +131,21 @@ final class WindowTinyLFUPolicy<K, V> implements EvictionPolicy<K, V> {
                         || sketch.estimate(node.key) > sketch.estimate(probationVictim.key);
 
         if (admit) {
+            admissions++;
             probationQueue.addToFront(node);
             probationSize++;
             queueMap.put(node.key, QueueType.PROBATION);
         } else {
+            rejections++;
             queueMap.remove(node.key);
         }
+    }
+
+    @Override
+    public PolicyStats getStats() {
+        long total = admissions + rejections;
+        double rate = total == 0 ? 0.0 : (double) rejections / total;
+        return new PolicyStats("WINDOW_TINY_LFU", admissions, rejections, rate);
     }
 
     void discardWindowVictim(CacheNode<K, V> node) {
