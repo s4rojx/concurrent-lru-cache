@@ -14,12 +14,12 @@ final class CacheSegment<K, V> {
 
     private final int capacity;
     private final Map<K, CacheNode<K, V>> map;
-    private final DoublyLinkedList<K, V> lru;
+    private final EvictionPolicy<K, V> policy;
 
-    CacheSegment(int capacity) {
+    CacheSegment(int capacity, EvictionPolicy<K, V> policy) {
         this.capacity = capacity;
         this.map = new HashMap<>(Math.max(capacity * 2, 16));
-        this.lru = new DoublyLinkedList<>();
+        this.policy = policy;
     }
 
     GetResult<V> get(K key, long nowNanos) {
@@ -31,7 +31,7 @@ final class CacheSegment<K, V> {
             removeNode(node);
             return GetResult.expired();
         }
-        lru.moveToFront(node);
+        policy.onAccess(node);
         return GetResult.hit(node.value);
     }
 
@@ -39,12 +39,12 @@ final class CacheSegment<K, V> {
         CacheNode<K, V> existing = map.get(key);
         if (existing != null) {
             existing.update(value, ttl);
-            lru.moveToFront(existing);
+            policy.onAccess(existing);
             return false;
         }
         CacheNode<K, V> node = new CacheNode<>(key, value, ttl);
         map.put(key, node);
-        lru.addToFront(node);
+        policy.onInsert(node);
         return evictIfOverCapacity();
     }
 
@@ -68,7 +68,7 @@ final class CacheSegment<K, V> {
 
     void clear() {
         map.clear();
-        lru.clear();
+        policy.clear();
     }
 
     int removeExpired(long nowNanos) {
@@ -79,7 +79,6 @@ final class CacheSegment<K, V> {
             }
         }
         for (CacheNode<K, V> node : expired) {
-            // Guard against node replacement during iteration.
             if (map.get(node.key) == node) {
                 removeNode(node);
             }
@@ -91,17 +90,27 @@ final class CacheSegment<K, V> {
         if (map.size() <= capacity) {
             return false;
         }
-        CacheNode<K, V> tail = lru.removeTail();
-        if (tail != null) {
-            map.remove(tail.key, tail);
+        if (policy instanceof WindowTinyLFUPolicy<K, V> wtlfu && wtlfu.isWindowOverCapacity()) {
+            CacheNode<K, V> windowVictim = policy.evictionCandidate();
+            if (windowVictim != null) {
+                map.remove(windowVictim.key, windowVictim);
+                wtlfu.promoteWindowVictimToMain(windowVictim);
+                if (map.size() <= capacity) {
+                    return true;
+                }
+            }
+        }
+        CacheNode<K, V> victim = policy.evictionCandidate();
+        if (victim != null) {
+            map.remove(victim.key, victim);
+            policy.onRemove(victim);
         }
         return true;
     }
 
     private void removeNode(CacheNode<K, V> node) {
-        // Invariant: node is removed from both the map and the LRU list together.
         map.remove(node.key, node);
-        lru.remove(node);
+        policy.onRemove(node);
     }
 
     enum GetStatus {

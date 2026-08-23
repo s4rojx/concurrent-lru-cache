@@ -41,6 +41,10 @@ final class DoublyLinkedList<K, V> {
         node.next = null;
     }
 
+    CacheNode<K, V> getTail() {
+        return tail;
+    }
+
     CacheNode<K, V> removeTail() {
         CacheNode<K, V> currentTail = tail;
         if (currentTail != null) {

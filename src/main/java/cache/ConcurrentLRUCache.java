@@ -26,15 +26,24 @@ public final class ConcurrentLRUCache<K, V> implements AutoCloseable {
     private final ExpirationManager<K, V> expirationManager;
 
     public ConcurrentLRUCache(int capacity) {
-        this(capacity, DEFAULT_CLEANUP_INTERVAL);
+        this(capacity, DEFAULT_CLEANUP_INTERVAL, DEFAULT_NUM_SEGMENTS, PolicyType.LRU);
     }
 
     public ConcurrentLRUCache(int capacity, Duration cleanupInterval) {
-        this(capacity, cleanupInterval, DEFAULT_NUM_SEGMENTS);
+        this(capacity, cleanupInterval, DEFAULT_NUM_SEGMENTS, PolicyType.LRU);
+    }
+
+    public ConcurrentLRUCache(int capacity, Duration cleanupInterval, int numSegments) {
+        this(capacity, cleanupInterval, numSegments, PolicyType.LRU);
+    }
+
+    public ConcurrentLRUCache(int capacity, PolicyType policy) {
+        this(capacity, DEFAULT_CLEANUP_INTERVAL, DEFAULT_NUM_SEGMENTS, policy);
     }
 
     @SuppressWarnings("unchecked")
-    public ConcurrentLRUCache(int capacity, Duration cleanupInterval, int numSegments) {
+    public ConcurrentLRUCache(
+            int capacity, Duration cleanupInterval, int numSegments, PolicyType policy) {
         if (capacity <= 0) {
             throw new IllegalArgumentException("capacity must be positive");
         }
@@ -50,9 +59,8 @@ public final class ConcurrentLRUCache<K, V> implements AutoCloseable {
         int base = capacity / numSegments;
         int remainder = capacity % numSegments;
         for (int i = 0; i < numSegments; i++) {
-            int segCapacity = base + (i < remainder ? 1 : 0);
-            // Ensure every segment has at least 1 slot of capacity.
-            this.segments[i] = new CacheSegment<>(Math.max(segCapacity, 1));
+            int segCapacity = Math.max(base + (i < remainder ? 1 : 0), 1);
+            this.segments[i] = new CacheSegment<>(segCapacity, createPolicy(policy, segCapacity));
         }
 
         this.expirationManager =
@@ -126,9 +134,6 @@ public final class ConcurrentLRUCache<K, V> implements AutoCloseable {
         }
     }
 
-    /**
-     * Returns an approximate point-in-time snapshot of the total entry count across all segments.
-     */
     public int size() {
         int total = 0;
         for (CacheSegment<K, V> segment : segments) {
@@ -143,7 +148,6 @@ public final class ConcurrentLRUCache<K, V> implements AutoCloseable {
     }
 
     public void clear() {
-        // Acquire all segment locks in index order to prevent deadlock.
         for (CacheSegment<K, V> segment : segments) {
             segment.lock.lock();
         }
@@ -218,6 +222,14 @@ public final class ConcurrentLRUCache<K, V> implements AutoCloseable {
     private CacheSegment<K, V> segmentFor(K key) {
         int index = (key.hashCode() & 0x7FFF_FFFF) % numSegments;
         return segments[index];
+    }
+
+    private static <K, V> EvictionPolicy<K, V> createPolicy(PolicyType type, int segCapacity) {
+        return switch (type) {
+            case LRU -> new LRUPolicy<>();
+            case LFU -> new LFUPolicy<>();
+            case WINDOW_TINY_LFU -> new WindowTinyLFUPolicy<>(segCapacity);
+        };
     }
 
     private static void validateTtl(Duration ttl) {
