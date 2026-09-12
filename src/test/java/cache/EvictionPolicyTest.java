@@ -152,7 +152,7 @@ class EvictionPolicyTest {
         int keySpace = 100_000;
         int warmup = 50_000;
         int measured = 200_000;
-        jmh.KeyDistribution zipf = new jmh.KeyDistribution(keySpace, true);
+        TestDistribution zipf = new TestDistribution(keySpace, true);
 
         double lruRate = measureHitRate(PolicyType.LRU, capacity, keySpace, warmup, measured, zipf);
         double lfuRate = measureHitRate(PolicyType.LFU, capacity, keySpace, warmup, measured, zipf);
@@ -173,7 +173,7 @@ class EvictionPolicyTest {
         int keySpace = 1000;
         int warmup = 5_000;
         int measured = 45_000;
-        jmh.KeyDistribution uniform = new jmh.KeyDistribution(keySpace, false);
+        TestDistribution uniform = new TestDistribution(keySpace, false);
 
         double lruRate =
                 measureHitRate(PolicyType.LRU, capacity, keySpace, warmup, measured, uniform);
@@ -201,8 +201,8 @@ class EvictionPolicyTest {
         int oldHotOffset = 0;
         int newHotOffset = 50_000;
 
-        jmh.KeyDistribution phase1Dist = new jmh.KeyDistribution(hotSetSize, true);
-        jmh.KeyDistribution phase2Dist = new jmh.KeyDistribution(hotSetSize, true);
+        TestDistribution phase1Dist = new TestDistribution(hotSetSize, true);
+        TestDistribution phase2Dist = new TestDistribution(hotSetSize, true);
 
         String[] keys = new String[keySpace];
         for (int i = 0; i < keySpace; i++) {
@@ -262,9 +262,9 @@ class EvictionPolicyTest {
             PolicyType policy,
             int capacity,
             String[] keys,
-            jmh.KeyDistribution phase1Dist,
+            TestDistribution phase1Dist,
             int phase1Offset,
-            jmh.KeyDistribution phase2Dist,
+            TestDistribution phase2Dist,
             int phase2Offset,
             int warmupOps,
             int phase1Ops,
@@ -307,7 +307,7 @@ class EvictionPolicyTest {
             int keySpace,
             int warmup,
             int measured,
-            jmh.KeyDistribution dist) {
+            TestDistribution dist) {
 
         String[] keys = new String[keySpace];
         for (int i = 0; i < keySpace; i++) {
@@ -449,6 +449,53 @@ class EvictionPolicyTest {
 
             assertEquals(0, exceptionCount.get(), policy + ": no exceptions expected");
             assertTrue(cache.size() <= capacity, policy + ": size must not exceed capacity");
+        }
+    }
+
+    private static final class TestDistribution {
+        private final int keySpaceSize;
+        private final int[] zipfTable;
+        private final boolean zipfian;
+
+        TestDistribution(int keySpaceSize, boolean zipfian) {
+            this.keySpaceSize = keySpaceSize;
+            this.zipfian = zipfian;
+
+            if (zipfian) {
+                double exponent = 1.0;
+                double[] weights = new double[keySpaceSize];
+                double total = 0.0;
+                for (int i = 0; i < keySpaceSize; i++) {
+                    weights[i] = 1.0 / Math.pow(i + 1, exponent);
+                    total += weights[i];
+                }
+                int lookupSize = 1 << 16;
+                zipfTable = new int[lookupSize];
+                double cumulative = 0.0;
+                int tablePos = 0;
+                for (int i = 0; i < keySpaceSize; i++) {
+                    cumulative += weights[i] / total;
+                    int upTo = (int) (cumulative * lookupSize);
+                    while (tablePos < upTo && tablePos < lookupSize) {
+                        zipfTable[tablePos++] = i;
+                    }
+                }
+                while (tablePos < lookupSize) {
+                    zipfTable[tablePos++] = keySpaceSize - 1;
+                }
+            } else {
+                zipfTable = null;
+            }
+        }
+
+        int nextKey() {
+            if (zipfian) {
+                int bucket =
+                        java.util.concurrent.ThreadLocalRandom.current().nextInt(zipfTable.length);
+                return zipfTable[bucket];
+            } else {
+                return java.util.concurrent.ThreadLocalRandom.current().nextInt(keySpaceSize);
+            }
         }
     }
 }
