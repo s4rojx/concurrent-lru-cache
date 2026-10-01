@@ -1,14 +1,56 @@
+# Maven build output and generated metadata
 target/
+out/
+bin/
 *.class
-*.log
 dependency-reduced-pom.xml
+flattened-pom.xml
+.flattened-pom.xml
+release.properties
+*.versionsBackup
+.mvn/timing.properties
 
+# IDE metadata
 .idea/
 .vscode/
 *.iml
+*.ipr
+*.iws
+.classpath
+.project
+.settings/
 
-# Local documentation & agent files
-docs/
+# Logs, reports, and JVM diagnostics
+*.log
+*.log.*
+hs_err_pid*.log
+replay_pid*.log
+*.hprof
+*.jfr
+
+# Operating-system and editor files
+.DS_Store
+._*
+Thumbs.db
+Desktop.ini
+*~
+*.swp
+*.swo
+*.orig
+*.rej
+
+# Local environment and credentials
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+*.jks
+*.keystore
+
+# Local agent files and private planning notes
 AGENTS.md
-ConcurrentLRU_Project_Upgrade_plan*.md
 .agents/
+ConcurrentLRU_Project_Upgrade_plan*.md
